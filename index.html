@@ -93,6 +93,15 @@
   }
   .key-meta a { color: #8a8a92; cursor: pointer; text-decoration: underline; }
 
+  .grid-2 {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 12px;
+  }
+  @media (max-width: 600px) {
+    .grid-2 { grid-template-columns: 1fr; }
+  }
+
   .file-zone {
     border: 2px dashed #2a2a2f;
     border-radius: 8px;
@@ -127,6 +136,7 @@
   button.primary:disabled { opacity: 0.4; cursor: not-allowed; }
 
   .error { color: #ff6b6b; font-size: 13px; margin-top: 8px; word-break: break-word; }
+  .status { color: #8a8a92; font-size: 13px; margin-top: 8px; }
   .spinner {
     display: inline-block;
     width: 14px;
@@ -147,12 +157,7 @@
     align-items: center;
     margin: 32px 0 12px;
   }
-  .history-header h2 {
-    font-size: 16px;
-    font-weight: 600;
-    margin: 0;
-    color: #e8e8ea;
-  }
+  .history-header h2 { font-size: 16px; font-weight: 600; margin: 0; color: #e8e8ea; }
   .clear-history {
     background: transparent;
     color: #8a8a92;
@@ -254,12 +259,31 @@
 
   <!-- Video options (เฉพาะโหมด video) -->
   <div class="card" id="videoOptions" style="display:none;">
-    <label for="duration">ความยาววิดีโอ (วินาที)</label>
-    <select id="duration">
-      <option value="6">6 วินาที</option>
-      <option value="12" selected>12 วินาที</option>
-      <option value="15">15 วินาที</option>
-    </select>
+    <label>ตัวเลือกวิดีโอ</label>
+    <div class="grid-2">
+      <div>
+        <label for="duration" style="margin-top:8px;">ความยาว (1-15 วินาที)</label>
+        <input type="number" id="duration" min="1" max="15" value="10">
+      </div>
+      <div>
+        <label for="aspectRatio" style="margin-top:8px;">Aspect Ratio</label>
+        <select id="aspectRatio">
+          <option value="">Auto (จากรูป)</option>
+          <option value="16:9">16:9</option>
+          <option value="9:16">9:16</option>
+          <option value="1:1">1:1</option>
+          <option value="4:3">4:3</option>
+          <option value="3:4">3:4</option>
+        </select>
+      </div>
+      <div>
+        <label for="resolution" style="margin-top:8px;">ความละเอียด</label>
+        <select id="resolution">
+          <option value="480p">480p (เร็วกว่า)</option>
+          <option value="720p" selected>720p (HD)</option>
+        </select>
+      </div>
+    </div>
   </div>
 
   <!-- Image upload -->
@@ -275,6 +299,7 @@
   <!-- Generate -->
   <div class="card" style="text-align:center;">
     <button class="primary" id="generateBtn">สร้างผลลัพธ์</button>
+    <div id="status" class="status"></div>
     <div id="error" class="error"></div>
   </div>
 
@@ -294,6 +319,8 @@
   const STORAGE_KEY = "xai_api_key";
   const HISTORY_KEY = "grok_imagine_history";
   const MAX_HISTORY = 30;
+  const POLL_INTERVAL_MS = 5000;
+  const POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 นาที
 
   // --- elements ---
   const apiKeyEl = document.getElementById("apiKey");
@@ -302,12 +329,15 @@
   const tabs = document.querySelectorAll(".tab");
   const videoOptions = document.getElementById("videoOptions");
   const durationEl = document.getElementById("duration");
+  const aspectRatioEl = document.getElementById("aspectRatio");
+  const resolutionEl = document.getElementById("resolution");
   const promptEl = document.getElementById("prompt");
   const fileInput = document.getElementById("fileInput");
   const fileLabel = document.getElementById("fileLabel");
   const dropZone = document.getElementById("dropZone");
   const preview = document.getElementById("preview");
   const generateBtn = document.getElementById("generateBtn");
+  const statusEl = document.getElementById("status");
   const errorEl = document.getElementById("error");
   const historyList = document.getElementById("historyList");
   const clearHistoryBtn = document.getElementById("clearHistory");
@@ -407,7 +437,6 @@
     try {
       localStorage.setItem(HISTORY_KEY, JSON.stringify(items.slice(0, MAX_HISTORY)));
     } catch (e) {
-      // localStorage อาจเต็มถ้ารูป/วิดีโอเยอะ
       console.warn("History save failed:", e);
     }
   }
@@ -458,7 +487,6 @@
       `;
     }).join("");
 
-    // bind delete buttons
     historyList.querySelectorAll(".delete-btn").forEach(btn => {
       btn.addEventListener("click", () => deleteHistoryItem(btn.dataset.id));
     });
@@ -478,6 +506,7 @@
   // --- Generate ---
   generateBtn.addEventListener("click", async () => {
     errorEl.textContent = "";
+    statusEl.textContent = "";
     const apiKey = apiKeyEl.value.trim();
     const promptText = promptEl.value.trim();
 
@@ -489,12 +518,15 @@
     generateBtn.innerHTML = '<span class="spinner"></span>กำลังสร้าง...';
 
     try {
-      const { dataUrl, mime } = await fileToDataUrl(selectedFile);
+      const { dataUrl } = await fileToDataUrl(selectedFile);
 
       if (currentMode === "image") {
-        await generateImage(apiKey, promptText, dataUrl, mime);
+        await generateImage(apiKey, promptText, dataUrl);
       } else {
-        await generateVideo(apiKey, promptText, dataUrl, parseInt(durationEl.value, 10));
+        const duration = parseInt(durationEl.value, 10) || 10;
+        const aspectRatio = aspectRatioEl.value || null;
+        const resolution = resolutionEl.value || "720p";
+        await generateVideo(apiKey, promptText, dataUrl, duration, aspectRatio, resolution);
       }
     } catch (err) {
       errorEl.textContent = "เกิดข้อผิดพลาด: " + err.message;
@@ -502,12 +534,14 @@
     } finally {
       generateBtn.disabled = false;
       generateBtn.textContent = "สร้างผลลัพธ์";
+      statusEl.textContent = "";
     }
   });
 
-  async function generateImage(apiKey, promptText, dataUrl, mime) {
-    const base64 = dataUrl.split(",")[1];
-    const res = await fetch("https://api.x.ai/v1/images/generations", {
+  // Image Edit — POST /v1/images/edits
+  async function generateImage(apiKey, promptText, dataUrl) {
+    statusEl.textContent = "กำลังประมวลผลภาพ...";
+    const res = await fetch("https://api.x.ai/v1/images/edits", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -516,9 +550,10 @@
       body: JSON.stringify({
         model: IMAGE_MODEL,
         prompt: promptText,
-        image: `data:${mime};base64,${base64}`,
-        response_format: "b64_json",
-        n: 1
+        image: {
+          url: dataUrl,
+          type: "image_url"
+        }
       })
     });
     if (!res.ok) {
@@ -526,10 +561,10 @@
       throw new Error(`HTTP ${res.status}: ${text}`);
     }
     const data = await res.json();
-    const b64 = data?.data?.[0]?.b64_json;
-    const url = data?.data?.[0]?.url;
-    const imgSrc = b64 ? `data:image/png;base64,${b64}` : url;
-    if (!imgSrc) throw new Error("ไม่พบภาพในผลลัพธ์");
+    // response อาจเป็น { data: [{ url }] } หรือ { data: [{ b64_json }] }
+    const item = data?.data?.[0];
+    const imgSrc = item?.url || (item?.b64_json ? `data:image/png;base64,${item.b64_json}` : null);
+    if (!imgSrc) throw new Error("ไม่พบภาพในผลลัพธ์: " + JSON.stringify(data));
 
     addHistoryItem({
       id: Date.now().toString(),
@@ -540,39 +575,74 @@
     });
   }
 
-  async function generateVideo(apiKey, promptText, dataUrl, duration) {
-    const res = await fetch("https://api.x.ai/v1/videos/generations", {
+  // Image-to-Video — POST /v1/videos/generations + polling
+  async function generateVideo(apiKey, promptText, dataUrl, duration, aspectRatio, resolution) {
+    statusEl.textContent = "กำลังส่งคำขอ...";
+    const body = {
+      model: VIDEO_MODEL,
+      prompt: promptText,
+      image: dataUrl,
+      duration: duration,
+      resolution: resolution
+    };
+    if (aspectRatio) body.aspect_ratio = aspectRatio;
+
+    const startRes = await fetch("https://api.x.ai/v1/videos/generations", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": `Bearer ${apiKey}`
       },
-      body: JSON.stringify({
-        model: VIDEO_MODEL,
-        prompt: promptText,
-        image: dataUrl,
-        duration: duration
-      })
+      body: JSON.stringify(body)
     });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`HTTP ${res.status}: ${text}`);
+    if (!startRes.ok) {
+      const text = await startRes.text();
+      throw new Error(`HTTP ${startRes.status}: ${text}`);
     }
-    const data = await res.json();
-    // xAI อาจคืน videoUrl ใน providerMetadata หรือ field อื่น
-    const videoUrl =
-      data?.video_url ||
-      data?.providerMetadata?.xai?.videoUrl ||
-      data?.data?.[0]?.url;
-    if (!videoUrl) throw new Error("ไม่พบ video URL: " + JSON.stringify(data));
+    const startData = await startRes.json();
+    const requestId = startData.request_id;
+    if (!requestId) throw new Error("ไม่ได้ request_id: " + JSON.stringify(startData));
 
-    addHistoryItem({
-      id: Date.now().toString(),
-      type: "video",
-      prompt: promptText,
-      url: videoUrl,
-      timestamp: Date.now()
-    });
+    // Poll for completion
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+    let attempt = 0;
+    while (Date.now() < deadline) {
+      attempt++;
+      const elapsed = Math.floor((Date.now() - (deadline - POLL_TIMEOUT_MS)) / 1000);
+      statusEl.textContent = `กำลังสร้างวิดีโอ... (${elapsed}s)`;
+
+      await new Promise(r => setTimeout(r, POLL_INTERVAL_MS));
+
+      const pollRes = await fetch(`https://api.x.ai/v1/videos/${requestId}`, {
+        headers: { "Authorization": `Bearer ${apiKey}` }
+      });
+      if (!pollRes.ok) {
+        const text = await pollRes.text();
+        throw new Error(`Poll HTTP ${pollRes.status}: ${text}`);
+      }
+      const pollData = await pollRes.json();
+      const status = pollData.status;
+
+      if (status === "done") {
+        const videoUrl = pollData?.video?.url;
+        if (!videoUrl) throw new Error("ไม่พบ video URL: " + JSON.stringify(pollData));
+        addHistoryItem({
+          id: Date.now().toString(),
+          type: "video",
+          prompt: promptText,
+          url: videoUrl,
+          timestamp: Date.now()
+        });
+        return;
+      } else if (status === "failed") {
+        const errMsg = pollData?.error?.message || "Generation failed";
+        throw new Error(errMsg);
+      } else if (status === "expired") {
+        throw new Error("Request expired");
+      }
+      // status === "pending" → continue polling
+    }
+    throw new Error("Timeout: วิดีโอใช้เวลานานเกิน 10 นาที");
   }
 
   // initial render
